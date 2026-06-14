@@ -17,6 +17,8 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless / thread-safe rendering
 import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.image as mpimg  # noqa: E402
+import matplotlib.patheffects as pe  # noqa: E402
 
 from pipeline.config import VIDEO_HEIGHT, VIDEO_WIDTH, new_tmp  # noqa: E402
 
@@ -94,6 +96,84 @@ def build_storyboard_frame(beats: list[dict], title: str) -> str:
         fig.savefig(out_path, facecolor="white")
     plt.close(fig)
     log.info("storyboard frame (%d/%d beats) -> %s", n, n, out_path)
+    return out_path
+
+
+def _illustration_prompt(title: str, nodes: list[str]) -> str:
+    """Prompt a SINGLE clean, text-free illustration for the whole chapter."""
+    subjects = ", ".join(nodes[:4]) if nodes else title
+    return (
+        f"a clean minimalist black ink line illustration about {title}, "
+        f"depicting {subjects}, thick clean black outlines, coloring book "
+        f"line art, monochrome, no color, no shading, flat white background, "
+        f"hand-drawn, simple, uncluttered, centered")
+
+
+def chapter_illustration(title: str, beats: list[dict]) -> str | None:
+    """Generate ONE text-free SDXL illustration for the whole chapter.
+
+    The node labels inform the prompt so the picture reflects the chapter's
+    concepts, but no text is rendered (we overlay readable labels ourselves in
+    ``build_image_label_frame``).  Returns the saved PNG path, or ``None`` on
+    failure so the caller can fall back to the diagram.
+    """
+    from pipeline import llm
+
+    nodes = [b["node"] for b in beats if b.get("node")]
+    try:
+        png_bytes = llm.generate_image(_illustration_prompt(title, nodes),
+                                       negative_prompt=SDXL_NEGATIVE)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("SDXL illustration failed (%s); using diagram instead",
+                    type(exc).__name__)
+        return None
+    out_path = new_tmp(suffix=".png", prefix="illus_")
+    with open(out_path, "wb") as fh:
+        fh.write(png_bytes)
+    log.info("chapter illustration -> %s (%d bytes)", out_path, len(png_bytes))
+    return out_path
+
+
+def build_image_label_frame(beats: list[dict], title: str,
+                            bg_path: str) -> str:
+    """Render the SDXL chapter image with our node labels overlaid on top.
+
+    Labels for ``beats[0..k-1]`` are placed at positions from the
+    ``connects_to`` graph (no boxes, no arrows — per the image-only design) with
+    a white halo so the technical terms stay readable over the illustration.
+    Returns the path to the saved PNG.
+    """
+    out_path = new_tmp(suffix=".png", prefix="imglbl_")
+    n = len(beats)
+    pos, bw, _bh = _graph_positions(beats) if n else ([], 0.24, 0.13)
+    fs = max(11, int(round(15 * bw / 0.24)))
+    wrap_w = max(8, int(round(16 * bw / 0.24)))
+
+    art = mpimg.imread(bg_path)
+    fig = plt.figure(figsize=(VIDEO_WIDTH / 100, VIDEO_HEIGHT / 100), dpi=100)
+    fig.patch.set_facecolor("white")
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
+
+    # Illustration fills the area below the title.
+    ax.imshow(art, extent=(0.04, 0.96, 0.04, 0.80), aspect="auto", zorder=0)
+
+    # Title + rule on the white margin above the image.
+    wrapped = "\n".join(textwrap.wrap(title or "Sketchnote", width=36)[:2])
+    ax.text(0.5, 0.97, wrapped, ha="center", va="top", color="black",
+            fontsize=26, fontweight="bold", zorder=6)
+    ax.plot([0.08, 0.92], [0.84, 0.84], color="black", linewidth=2.5, zorder=6)
+
+    # Node labels overlaid on the image — white halo keeps them readable.
+    for b, (cx, cy) in zip(beats, pos):
+        text = "\n".join(textwrap.wrap(b["node"], width=wrap_w)[:3])
+        ax.text(cx, cy, text, ha="center", va="center", color="black",
+                fontsize=fs, fontweight="bold", zorder=5,
+                path_effects=[pe.withStroke(linewidth=5, foreground="white")])
+
+    fig.savefig(out_path, facecolor="white")
+    plt.close(fig)
+    log.info("image+label frame (%d/%d labels) -> %s", n, n, out_path)
     return out_path
 
 
@@ -370,8 +450,6 @@ def _sdxl_card(concepts, title: str) -> str:
 
 def _compose_titled(img_path: str, title: str) -> str:
     """Place the AI illustration on a white card under a bold chapter title."""
-    import matplotlib.image as mpimg
-
     out_path = new_tmp(suffix=".png", prefix="sdxl_")
     art = mpimg.imread(img_path)
 

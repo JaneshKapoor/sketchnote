@@ -77,9 +77,11 @@ def _build_chapter(ch: dict, voice: str, use_sdxl: bool) -> dict:
 
     For each beat:
       1. Synthesize just that beat's sentence with Kokoro → get duration d.
-      2. Render the cumulative storyboard diagram (nodes 0..k).
-      3. animate_beat reveals only the new node k + its arrow over d seconds
-         (prior nodes stay drawn; drawing finishes at ~75 % then holds).
+      2. Render the cumulative visual (nodes 0..k). With ``use_sdxl`` this is the
+         chapter's SDXL illustration with our labels overlaid; otherwise the
+         hand-drawn storyboard diagram.
+      3. animate_beat reveals only the new label k over d seconds (prior labels
+         stay drawn; drawing finishes at ~75 % then holds).
       4. Mux beat audio onto the beat clip.
     All beat clips are concatenated into the chapter clip.
 
@@ -94,6 +96,10 @@ def _build_chapter(ch: dict, voice: str, use_sdxl: bool) -> dict:
         beats = [{"say": ch["text"][:300] or f"This section covers {ch['title']}.",
                   "node": ch["title"][:40], "connects_to": None}]
 
+    # Image-only mode: generate ONE text-free illustration for the chapter and
+    # overlay our labels on it. Falls back to the diagram if SDXL is unavailable.
+    bg_path = visuals_mod.chapter_illustration(ch["title"], beats) if use_sdxl else None
+
     beat_clips: list[str] = []
     beat_mds: list[str] = []
     prev_png: str | None = None
@@ -101,8 +107,12 @@ def _build_chapter(ch: dict, voice: str, use_sdxl: bool) -> dict:
     for k, beat in enumerate(beats):
         log.info("Chapter %r beat %d/%d: node=%r", ch["title"], k + 1, len(beats),
                  beat["node"])
-        # Cumulative diagram up to (and including) beat k.
-        full_png = visuals_mod.build_storyboard_frame(beats[: k + 1], ch["title"])
+        # Cumulative visual up to (and including) beat k.
+        if bg_path:
+            full_png = visuals_mod.build_image_label_frame(
+                beats[: k + 1], ch["title"], bg_path)
+        else:
+            full_png = visuals_mod.build_storyboard_frame(beats[: k + 1], ch["title"])
 
         wav_path, duration = tts.synthesize(beat["say"], voice=voice)
         silent = sketch.animate_beat(full_png, prev_png, target_duration=duration)
@@ -134,9 +144,10 @@ def build_ui() -> gr.Blocks:
                     p_start = gr.Number(value=0, precision=0, label="First page (0 = auto)")
                     p_end = gr.Number(value=0, precision=0, label="Last page (0 = auto)")
                 voice = gr.Dropdown(VOICES, value="af_heart", label="Narration voice")
-                use_sdxl = gr.Checkbox(value=False,
-                                       label="AI icon (SDXL-Turbo on Modal) — "
-                                             "off uses a hand-drawn concept diagram")
+                use_sdxl = gr.Checkbox(value=True,
+                                       label="AI illustration + labels (SDXL-Turbo "
+                                             "on Modal) — off uses a hand-drawn "
+                                             "concept diagram")
                 go = gr.Button("Generate video", variant="primary")
                 gr.Examples(examples=[["assets/sample.pdf"]], inputs=[pdf_in],
                             label="Try the sample PDF")
