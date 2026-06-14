@@ -52,9 +52,14 @@ def build_storyboard_frame(beats: list[dict], title: str) -> str:
         plt.close(fig)
         return out_path
 
-    label_to_idx = {b["node"]: i for i, b in enumerate(beats)}
-    pos = _node_positions(n)
-    bw, bh = 0.24, 0.13
+    label_to_idx = {}
+    for i, b in enumerate(beats):
+        label_to_idx.setdefault(b["node"], i)
+    pos, bw, bh = _graph_positions(beats)
+    # Scale arrow gap, font and wrap width to the (possibly shrunk) box size.
+    shrink = max(12.0, min(bw, bh) * VIDEO_HEIGHT * 0.36)
+    fs = max(9, int(round(13 * bw / 0.24)))
+    wrap_w = max(8, int(round(14 * bw / 0.24)))
 
     with plt.xkcd():
         fig = plt.figure(figsize=(VIDEO_WIDTH / 100, VIDEO_HEIGHT / 100), dpi=100)
@@ -68,23 +73,23 @@ def build_storyboard_frame(beats: list[dict], title: str) -> str:
                 fontsize=26, fontweight="bold")
         ax.plot([0.08, 0.92], [0.82, 0.82], color="black", linewidth=2.5)
 
-        # Edges first (under boxes).
+        # Edges first (under boxes) — follow the connects_to graph.
         for b in beats:
             ct = b.get("connects_to")
-            if ct and ct in label_to_idx:
+            dst_i = label_to_idx.get(b["node"])
+            if ct and ct in label_to_idx and label_to_idx[ct] != dst_i:
                 src = label_to_idx[ct]
-                dst = label_to_idx[b["node"]]
-                ax.annotate("", xy=pos[dst], xytext=pos[src],
+                ax.annotate("", xy=pos[dst_i], xytext=pos[src],
                             arrowprops=dict(arrowstyle="-|>", color="black",
-                                            lw=2, shrinkA=24, shrinkB=24))
+                                            lw=2, shrinkA=shrink, shrinkB=shrink))
 
         # Boxes + labels.
         for b, (cx, cy) in zip(beats, pos):
             ax.add_patch(plt.Rectangle((cx - bw / 2, cy - bh / 2), bw, bh,
                                        fill=False, edgecolor="black", linewidth=2.5))
-            text = "\n".join(textwrap.wrap(b["node"], width=14)[:3])
+            text = "\n".join(textwrap.wrap(b["node"], width=wrap_w)[:3])
             ax.text(cx, cy, text, ha="center", va="center",
-                    fontsize=13, color="black")
+                    fontsize=fs, color="black")
 
         fig.savefig(out_path, facecolor="white")
     plt.close(fig)
@@ -157,6 +162,78 @@ def _norm_diagram(diagram):
         if a in index and b in index and index[a] != index[b]:
             edges.append((index[a], index[b]))
     return nodes, edges
+
+
+def _graph_positions(beats: list[dict]):
+    """Lay out beat nodes from the ``connects_to`` graph.
+
+    Returns ``(positions, bw, bh)`` where ``positions[i]`` is the (x, y) center
+    of ``beats[i]``.  Branching graphs become a left->right layered tree; pure
+    chains become a serpentine flow — so the shape reflects the chapter's actual
+    structure instead of a fixed grid.  Box size adapts so everything fits.
+    """
+    n = len(beats)
+    if n == 0:
+        return [], 0.24, 0.13
+    idx: dict[str, int] = {}
+    for i, b in enumerate(beats):
+        idx.setdefault(b["node"], i)
+    parent: list[int | None] = [None] * n
+    for i, b in enumerate(beats):
+        ct = b.get("connects_to")
+        if ct and ct in idx and idx[ct] != i:
+            parent[i] = idx[ct]
+
+    # Longest-path depth from roots (bounded passes -> cycle-safe).
+    depth = [0] * n
+    for _ in range(n):
+        changed = False
+        for i in range(n):
+            pi = parent[i]
+            if pi is not None and depth[i] <= depth[pi]:
+                depth[i] = depth[pi] + 1
+                changed = True
+        if not changed:
+            break
+
+    layers: dict[int, list[int]] = {}
+    for i in range(n):
+        layers.setdefault(depth[i], []).append(i)
+    n_layers = max(depth) + 1
+    max_w = max(len(v) for v in layers.values())
+
+    x_lo, x_hi, y_lo, y_hi = 0.10, 0.90, 0.12, 0.72
+    pos: list[tuple[float, float]] = [(0.5, 0.5)] * n
+
+    # Pure chain of >3 nodes -> serpentine grid (uses vertical space).
+    if max_w == 1 and n_layers == n and n > 3:
+        cols = 3
+        rows = math.ceil(n / cols)
+        bw = min(0.26, (x_hi - x_lo) / cols * 0.82)
+        bh = min(0.13, (y_hi - y_lo) / rows * 0.60)
+        order = sorted(range(n), key=lambda i: depth[i])
+        for slot, i in enumerate(order):
+            r, c = divmod(slot, cols)
+            if r % 2 == 1:                      # snake: reverse alternate rows
+                c = cols - 1 - c
+            cx = x_lo + (x_hi - x_lo) * (c + 0.5) / cols
+            cy = y_hi - (y_hi - y_lo) * (r + 0.5) / rows
+            pos[i] = (cx, cy)
+        return pos, bw, bh
+
+    # General / branching -> left-to-right layered tree.
+    bw = min(0.24, (x_hi - x_lo) / max(1, n_layers) * 0.82)
+    bh = min(0.13, (y_hi - y_lo) / max(1, max_w) * 0.70)
+    for d, members in layers.items():
+        members = sorted(members)               # stable order within a layer
+        cx = 0.5 if n_layers == 1 else \
+            x_lo + (x_hi - x_lo) * (d + 0.5) / n_layers
+        k = len(members)
+        for j, i in enumerate(members):
+            cy = (y_lo + y_hi) / 2 if k == 1 else \
+                y_hi - (y_hi - y_lo) * (j + 0.5) / k
+            pos[i] = (cx, cy)
+    return pos, bw, bh
 
 
 def _node_positions(n: int) -> list[tuple[float, float]]:
