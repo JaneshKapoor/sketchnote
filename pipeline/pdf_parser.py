@@ -106,16 +106,21 @@ def _from_toc(doc, lo: int, hi: int) -> list[Chapter]:
     """
     toc = doc.get_toc(simple=True)  # [[level, title, page1based], ...]
     if not toc:
+        log.info("_from_toc: no TOC in PDF")
         return []
     entries = [(t[0], t[1].strip(), t[2] - 1) for t in toc
                if t[2] - 1 >= 0 and lo <= t[2] - 1 <= hi
                and not _TOC_SKIP_RE.search(t[1] or "")]
+    log.info("_from_toc: %d raw TOC entries in range, %d after skip filter",
+             sum(1 for t in toc if lo <= t[2] - 1 <= hi), len(entries))
     if not entries:
         return []
     levels = sorted({lv for lv, _, _ in entries})
     chosen = next((lv for lv in levels
                    if sum(1 for e in entries if e[0] == lv) >= 2), levels[0])
     tops = [(title, start) for lv, title, start in entries if lv == chosen]
+    log.info("_from_toc: using level %d -> %d chapters: %s",
+             chosen, len(tops), [t for t, _ in tops])
     if not tops:
         return []
     chapters: list[Chapter] = []
@@ -173,6 +178,7 @@ def _detect_heading(page) -> Optional[str]:
 
 def _equal_buckets(doc, lo: int, hi: int, n: int) -> list[Chapter]:
     """Final fallback: split the page range into N roughly equal buckets."""
+    log.info("_equal_buckets: pages %d-%d into %d buckets (last resort)", lo, hi, n)
     n = max(1, min(n, hi - lo + 1))
     total = hi - lo + 1
     size = max(1, total // n)
@@ -291,9 +297,16 @@ def _finalize(chapters: list[Chapter], max_chapters: Optional[int]) -> list[Chap
     """
     if max_chapters:
         chapters = chapters[:max_chapters]
-    for ch in chapters:
+    for i, ch in enumerate(chapters):
         ch["text"] = _clean(ch["text"])[:MAX_CHARS_PER_CHAPTER]
         ch["title"] = _clean_title(ch["title"])[:120]
+        # Log enough to verify chapters are distinct (first 120 chars of cleaned text).
+        log.info(
+            "Chapter %d/%d: title=%r pages=%d-%d text_len=%d head=%r",
+            i + 1, len(chapters),
+            ch["title"], ch["page_start"], ch["page_end"],
+            len(ch["text"]), ch["text"][:120],
+        )
     return chapters
 
 

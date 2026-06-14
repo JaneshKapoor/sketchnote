@@ -116,44 +116,65 @@ def _strip_json(raw: str) -> dict | None:
 
 @app.function(image=llm_image, gpu="A10G", secrets=[hf_secret],
               volumes={CACHE_DIR: cache_vol}, timeout=900,
-              scaledown_window=300)
+              scaledown_window=300, min_containers=1)
 def summarize_chapter(title: str, text: str) -> dict:
     """MiniCPM4.1-8B (8B params) -> strict-JSON storyboard {"beats":[...]}."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     if not _LLM:
+        print(f"[summarize_chapter] cold start: loading {SUMMARIZER_MODEL}")
         tok = AutoTokenizer.from_pretrained(SUMMARIZER_MODEL, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
             SUMMARIZER_MODEL, torch_dtype=torch.bfloat16,
             device_map="cuda", trust_remote_code=True).eval()
         _LLM.update(model=model, tokenizer=tok)
+        print("[summarize_chapter] model loaded OK")
 
     tok, model = _LLM["tokenizer"], _LLM["model"]
-    # .replace (not .format): the prompt's example JSON has literal { } braces.
+    print(f"[summarize_chapter] title={title!r} text_len={len(text or '')}")
+
+    # .replace (NOT .format): the example JSON in the prompt has literal { } braces.
     prompt = (STORYBOARD_PROMPT
               .replace("<<TITLE>>", title or "")
               .replace("<<TEXT>>", (text or "")[:6000]))
 
     def _run(user_prompt: str) -> str:
         messages = [{"role": "user", "content": user_prompt}]
-        text_in = tok.apply_chat_template(messages, tokenize=False,
-                                          add_generation_prompt=True,
-                                          enable_thinking=False)
+        # enable_thinking=False: skip MiniCPM's internal chain-of-thought.
+        # Wrap in try/except in case older tokenizer templates don't support the kwarg.
+        try:
+            text_in = tok.apply_chat_template(messages, tokenize=False,
+                                              add_generation_prompt=True,
+                                              enable_thinking=False)
+        except TypeError:
+            text_in = tok.apply_chat_template(messages, tokenize=False,
+                                              add_generation_prompt=True)
         inputs = tok([text_in], return_tensors="pt").to(model.device)
-        out = model.generate(**inputs, max_new_tokens=768,
-                             do_sample=True, temperature=0.6, top_p=0.9)
+        with torch.no_grad():
+            out = model.generate(**inputs, max_new_tokens=900,
+                                 do_sample=True, temperature=0.6, top_p=0.9)
         return tok.decode(out[0][inputs["input_ids"].shape[-1]:],
                           skip_special_tokens=True)
 
     raw = _run(prompt)
+    # ── Log raw output before any parsing (visible in `modal app logs sketchnote`) ──
+    print(f"[summarize_chapter] raw output (first 800 chars): {raw[:800]!r}")
+
     parsed = _strip_json(raw)
-    if parsed is None or not parsed.get("beats"):  # one retry with a stricter nudge
-        raw = _run(prompt + "\nOutput ONLY the JSON object, nothing else.")
-        parsed = _strip_json(raw)
-    if parsed is None:
-        parsed = {"beats": [], "raw": raw[:2000]}
-    return parsed
+    if parsed is None or not parsed.get("beats"):
+        print("[summarize_chapter] no beats on first attempt — retrying with nudge")
+        raw2 = _run(prompt + "\nOutput ONLY the JSON object, nothing else.")
+        print(f"[summarize_chapter] retry raw (first 400 chars): {raw2[:400]!r}")
+        parsed = _strip_json(raw2)
+
+    if parsed and parsed.get("beats"):
+        print(f"[summarize_chapter] success: {len(parsed['beats'])} beats")
+        return parsed
+
+    # Both attempts failed: return the raw text so the client can log it.
+    print(f"[summarize_chapter] JSON parse failed after retry. Returning raw.")
+    return {"beats": [], "raw": raw[:2000]}
 
 
 _PARSE: dict = {}  # warm-container cache for Nemotron Parse
