@@ -74,7 +74,14 @@ SUMMARIZE_PROMPT = (
     '  "narration_script": a spoken-style summary of 80-150 words, clear and '
     "engaging, plain text only (no bullets, no markdown).\n"
     '  "visual_concepts": an array of 3 to 5 short noun phrases (2-4 words '
-    "each) naming the key ideas to draw.\n\n"
+    "each) naming the key ideas to draw.\n"
+    '  "diagram": an object with "nodes" and "edges" that diagrams how the key '
+    "ideas connect. "
+    '"nodes" is an array of 3 to 6 objects, each {"id": a short unique id, '
+    '"label": a real concept name of 1-4 words from the chapter}. '
+    '"edges" is an array of [from_id, to_id] pairs showing the flow/'
+    "relationship between nodes (use the real ids). Keep labels concrete and "
+    "specific to the chapter, never placeholders.\n\n"
     "Chapter title: {title}\nChapter text:\n{text}\n\nReturn only the JSON object."
 )
 
@@ -127,7 +134,7 @@ def summarize_chapter(title: str, text: str) -> dict:
                                           add_generation_prompt=True,
                                           enable_thinking=False)
         inputs = tok([text_in], return_tensors="pt").to(model.device)
-        out = model.generate(**inputs, max_new_tokens=512,
+        out = model.generate(**inputs, max_new_tokens=768,
                              do_sample=True, temperature=0.6, top_p=0.9)
         return tok.decode(out[0][inputs["input_ids"].shape[-1]:],
                           skip_special_tokens=True)
@@ -197,15 +204,22 @@ def _md_objects(markdown: str) -> list[dict]:
 @app.function(image=sdxl_image, gpu="A10G", secrets=[hf_secret],
               volumes={CACHE_DIR: cache_vol}, timeout=600,
               scaledown_window=300)
-def generate_image(prompt: str) -> bytes:
-    """Optional: SDXL-Turbo (~3.5B) few-step image. Returns PNG bytes."""
+def generate_image(prompt: str, negative_prompt: str = "") -> bytes:
+    """Optional: SDXL-Turbo (~3.5B) few-step image. Returns PNG bytes.
+
+    A negative_prompt (e.g. to suppress text/letters/watermarks) needs
+    classifier-free guidance, so it is only honored with guidance_scale > 1.
+    """
     import torch
     from diffusers import AutoPipelineForText2Image
 
     pipe = AutoPipelineForText2Image.from_pretrained(
         SDXL_TURBO_MODEL, torch_dtype=torch.float16, variant="fp16").to("cuda")
-    image = pipe(prompt=prompt, num_inference_steps=4,
-                 guidance_scale=0.0).images[0]
+    kwargs = dict(prompt=prompt, num_inference_steps=4, guidance_scale=0.0)
+    if negative_prompt:
+        kwargs.update(negative_prompt=negative_prompt,
+                      num_inference_steps=6, guidance_scale=2.0)
+    image = pipe(**kwargs).images[0]
     buf = io.BytesIO()
     image.save(buf, format="PNG")
     return buf.getvalue()

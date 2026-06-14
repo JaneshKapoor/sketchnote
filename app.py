@@ -70,9 +70,11 @@ def _build_chapter(ch: dict, voice: str, use_sdxl: bool) -> dict:
     summary = llm.summarize_chapter(ch["title"], ch["text"])
     narration = summary.get("narration_script") or ch["text"][:600]
     concepts = summary.get("visual_concepts") or [ch["title"]]
+    diagram = summary.get("diagram")
 
     wav_path, duration = tts.synthesize(narration, voice=voice)
-    png_path = visuals_mod.build_visual(concepts, ch["title"], use_sdxl=use_sdxl)
+    png_path = visuals_mod.build_visual(concepts, ch["title"], diagram=diagram,
+                                        use_sdxl=use_sdxl)
     silent = sketch.animate(png_path, target_duration=duration)
     clip_path = video.mux(silent, wav_path)
 
@@ -98,9 +100,9 @@ def build_ui() -> gr.Blocks:
                     p_start = gr.Number(value=0, precision=0, label="First page (0 = auto)")
                     p_end = gr.Number(value=0, precision=0, label="Last page (0 = auto)")
                 voice = gr.Dropdown(VOICES, value="af_heart", label="Narration voice")
-                use_sdxl = gr.Checkbox(value=True,
-                                       label="AI illustrations (SDXL-Turbo on Modal) — "
-                                             "uncheck for a fast text-only card")
+                use_sdxl = gr.Checkbox(value=False,
+                                       label="AI icon (SDXL-Turbo on Modal) — "
+                                             "off uses a hand-drawn concept diagram")
                 go = gr.Button("Generate video", variant="primary")
                 gr.Examples(examples=[["assets/sample.pdf"]], inputs=[pdf_in],
                             label="Try the sample PDF")

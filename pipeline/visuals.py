@@ -1,11 +1,16 @@
 """Visual builder: a clean black-on-white "whiteboard card" from the chapter
-title + visual concepts. White background and black strokes make the sketch
-reveal in sketch.py look natural. SDXL-Turbo is an OPTIONAL upgrade that, on any
-failure, falls back to the card so the pipeline never hard-fails.
+title + an LLM-authored concept diagram. White background and black strokes make
+the sketch reveal in sketch.py look natural.
+
+Default visual: a hand-drawn (matplotlib ``plt.xkcd``) node/edge diagram built
+from the model's ``diagram`` field. SDXL-Turbo is an OPTIONAL upgrade (off by
+default) restricted to a single text-free icon. Both paths fall back to a plain
+concept card so the pipeline never hard-fails.
 """
 from __future__ import annotations
 
 import logging
+import math
 import textwrap
 
 import matplotlib
@@ -17,15 +22,30 @@ from pipeline.config import VIDEO_HEIGHT, VIDEO_WIDTH, new_tmp  # noqa: E402
 
 log = logging.getLogger("sketchnote.visuals")
 
+# Suppress text/letters/etc. so the optional SDXL icon stays a clean glyph.
+SDXL_NEGATIVE = ("text, letters, words, labels, watermark, signature, caption, "
+                 "numbers, multiple objects, clutter, color, shading, gradient")
 
-def build_visual(concepts, title: str, use_sdxl: bool = False) -> str:
-    """Return a PNG path for the chapter's visual. Tries SDXL only if asked."""
+
+def build_visual(concepts, title: str, diagram=None,
+                 use_sdxl: bool = False) -> str:
+    """Return a PNG path for the chapter's visual.
+
+    Order: optional SDXL icon (if asked) -> LLM diagram card -> concept card.
+    """
     if use_sdxl:
         try:
             return _sdxl_card(concepts, title)
         except Exception as exc:  # noqa: BLE001
-            log.warning("SDXL image failed (%s); using concept card",
+            log.warning("SDXL image failed (%s); using diagram card",
                         type(exc).__name__)
+    try:
+        nodes, edges = _norm_diagram(diagram)
+        if len(nodes) >= 2:
+            return _diagram_card(nodes, edges, title)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("diagram card failed (%s); using concept card",
+                    type(exc).__name__)
     return _concept_card(concepts, title)
 
 
@@ -38,6 +58,94 @@ def _norm_concepts(concepts) -> list[str]:
         if s:
             out.append(s)
     return out[:5] or ["Key idea"]
+
+
+def _norm_diagram(diagram):
+    """Turn a {nodes:[{id,label}], edges:[[a,b]]} dict into drawable parts.
+
+    Returns (nodes, edges) where nodes is a list of label strings and edges is
+    a list of (src_index, dst_index) tuples referencing those labels.
+    """
+    nodes, index = [], {}
+    for nd in (diagram or {}).get("nodes") or []:
+        if isinstance(nd, dict):
+            nid = str(nd.get("id", "")).strip()
+            label = str(nd.get("label", nd.get("id", ""))).strip()
+        else:
+            label = str(nd).strip()
+            nid = label
+        nid = nid or label
+        if not label or nid in index:
+            continue
+        index[nid] = len(nodes)
+        nodes.append(label)
+        if len(nodes) >= 6:
+            break
+    edges = []
+    for e in (diagram or {}).get("edges") or []:
+        if isinstance(e, (list, tuple)) and len(e) >= 2:
+            a, b = str(e[0]).strip(), str(e[1]).strip()
+        elif isinstance(e, dict):
+            a, b = str(e.get("from", "")).strip(), str(e.get("to", "")).strip()
+        else:
+            continue
+        if a in index and b in index and index[a] != index[b]:
+            edges.append((index[a], index[b]))
+    return nodes, edges
+
+
+def _node_positions(n: int) -> list[tuple[float, float]]:
+    """Lay out n boxes on a centered grid in the area below the title rule."""
+    cols = min(n, 3)
+    rows = math.ceil(n / cols)
+    x_lo, x_hi, y_lo, y_hi = 0.12, 0.88, 0.14, 0.70
+    positions: list[tuple[float, float]] = []
+    for i in range(n):
+        r, c = divmod(i, cols)
+        in_row = cols if r < rows - 1 or n % cols == 0 else n % cols
+        cx = (x_lo + x_hi) / 2 if in_row == 1 else \
+            x_lo + (x_hi - x_lo) * c / (in_row - 1)
+        cy = (y_lo + y_hi) / 2 if rows == 1 else \
+            y_hi - (y_hi - y_lo) * r / (rows - 1)
+        positions.append((cx, cy))
+    return positions
+
+
+def _diagram_card(nodes: list[str], edges, title: str) -> str:
+    """Render an LLM-authored node/edge diagram as a hand-drawn xkcd-style card."""
+    out_path = new_tmp(suffix=".png", prefix="diag_")
+    pos = _node_positions(len(nodes))
+    bw, bh = 0.24, 0.13
+
+    with plt.xkcd():
+        fig = plt.figure(figsize=(VIDEO_WIDTH / 100, VIDEO_HEIGHT / 100), dpi=100)
+        fig.patch.set_facecolor("white")
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis("off")
+
+        wrapped = "\n".join(textwrap.wrap(title or "Sketchnote", width=36)[:2])
+        ax.text(0.5, 0.95, wrapped, ha="center", va="top", color="black",
+                fontsize=26, fontweight="bold")
+        ax.plot([0.08, 0.92], [0.82, 0.82], color="black", linewidth=2.5)
+
+        for a, b in edges:  # arrows first so boxes sit on top
+            ax.annotate("", xy=pos[b], xytext=pos[a],
+                        arrowprops=dict(arrowstyle="-|>", color="black",
+                                        lw=2, shrinkA=24, shrinkB=24))
+        for label, (cx, cy) in zip(nodes, pos):
+            ax.add_patch(plt.Rectangle((cx - bw / 2, cy - bh / 2), bw, bh,
+                                       fill=False, edgecolor="black", linewidth=2.5))
+            text = "\n".join(textwrap.wrap(label, width=14)[:3])
+            ax.text(cx, cy, text, ha="center", va="center", fontsize=13,
+                    color="black")
+
+        fig.savefig(out_path, facecolor="white")
+    plt.close(fig)
+    log.info("diagram card -> %s (%d nodes, %d edges)",
+             out_path, len(nodes), len(edges))
+    return out_path
 
 
 def _concept_card(concepts, title: str) -> str:
@@ -93,12 +201,12 @@ def _flow_diagram(ax, items: list[str]) -> None:
 
 
 def _sdxl_prompt(title: str, items: list[str]) -> str:
-    """Build a prompt biased toward clean, monochrome whiteboard line-art."""
-    subject = ", ".join(items)
+    """Build a prompt for a SINGLE clean, text-free monochrome icon."""
+    subject = items[0] if items else title
     return (
-        f"black and white line drawing, whiteboard marker sketch of {title}: "
-        f"{subject}. thick clean black outlines, coloring book style, "
-        f"monochrome, no color, no shading, no text, flat white background, "
+        f"a single minimalist black ink icon representing {subject}, "
+        f"thick clean black outlines, centered, coloring book line art, "
+        f"monochrome, no color, no shading, flat white background, "
         f"simple minimal doodle, hand-drawn")
 
 
@@ -110,7 +218,8 @@ def _sdxl_card(concepts, title: str) -> str:
     from pipeline import llm
 
     items = _norm_concepts(concepts)
-    png_bytes = llm.generate_image(_sdxl_prompt(title, items))
+    png_bytes = llm.generate_image(_sdxl_prompt(title, items),
+                                   negative_prompt=SDXL_NEGATIVE)
     raw_path = new_tmp(suffix=".png", prefix="sdxlraw_")
     with open(raw_path, "wb") as fh:
         fh.write(png_bytes)
@@ -143,6 +252,13 @@ def _compose_titled(img_path: str, title: str) -> str:
 
 if __name__ == "__main__":  # quick manual check
     logging.basicConfig(level=logging.INFO)
+    demo_diagram = {
+        "nodes": [{"id": "a", "label": "Evaporation"},
+                  {"id": "b", "label": "Condensation"},
+                  {"id": "c", "label": "Precipitation"},
+                  {"id": "d", "label": "Collection"}],
+        "edges": [["a", "b"], ["b", "c"], ["c", "d"], ["d", "a"]],
+    }
     p = build_visual(["evaporation", "condensation", "precipitation"],
-                     "The Water Cycle")
+                     "The Water Cycle", diagram=demo_diagram)
     print(p)

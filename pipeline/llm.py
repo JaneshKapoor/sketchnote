@@ -23,7 +23,14 @@ SUMMARIZE_PROMPT = (
     '  "narration_script": a spoken-style summary of 80-150 words, clear and '
     "engaging, plain text only (no bullets, no markdown).\n"
     '  "visual_concepts": an array of 3 to 5 short noun phrases (2-4 words '
-    "each) naming the key ideas to draw.\n\n"
+    "each) naming the key ideas to draw.\n"
+    '  "diagram": an object with "nodes" and "edges" that diagrams how the key '
+    "ideas connect. "
+    '"nodes" is an array of 3 to 6 objects, each {"id": a short unique id, '
+    '"label": a real concept name of 1-4 words from the chapter}. '
+    '"edges" is an array of [from_id, to_id] pairs showing the flow/'
+    "relationship between nodes (use the real ids). Keep labels concrete and "
+    "specific to the chapter, never placeholders.\n\n"
     "Chapter title: {title}\n"
     "Chapter text:\n{text}\n\n"
     "Return only the JSON object."
@@ -68,12 +75,12 @@ def parse_pages(images: list[bytes]) -> list[dict]:
     return fn.remote(images)
 
 
-def generate_image(prompt: str) -> bytes:
+def generate_image(prompt: str, negative_prompt: str = "") -> bytes:
     """Call the optional SDXL-Turbo Modal function. Raises if unavailable."""
     fn = _modal_function("generate_image")
     if fn is None:
         raise RuntimeError("generate_image Modal function not available")
-    return fn.remote(prompt)
+    return fn.remote(prompt, negative_prompt)
 
 
 # --- Coercion / fallback ---------------------------------------------------
@@ -90,7 +97,59 @@ def _coerce_summary(result, title: str, text: str) -> dict:
         return _extractive_summary(title, text)
     if not concepts:
         concepts = _keywords(text, title)
-    return {"narration_script": script, "visual_concepts": concepts}
+    diagram = _coerce_diagram(result.get("diagram")) or _fallback_diagram(concepts)
+    return {"narration_script": script, "visual_concepts": concepts,
+            "diagram": diagram}
+
+
+def _coerce_diagram(raw) -> dict | None:
+    """Validate a model-authored diagram into {nodes:[{id,label}], edges:[[a,b]]}.
+
+    Returns None when fewer than two usable nodes are present so callers can
+    fall back to a concept-derived diagram.
+    """
+    if not isinstance(raw, dict):
+        return None
+    nodes, ids = [], set()
+    for nd in raw.get("nodes") or []:
+        if isinstance(nd, dict):
+            nid = str(nd.get("id", "")).strip()
+            label = str(nd.get("label", "")).strip()
+        else:
+            label = str(nd).strip()
+            nid = label
+        if not label:
+            continue
+        nid = nid or label
+        if nid in ids:
+            continue
+        ids.add(nid)
+        nodes.append({"id": nid, "label": label[:40]})
+        if len(nodes) >= 6:
+            break
+    if len(nodes) < 2:
+        return None
+    edges = []
+    for e in raw.get("edges") or []:
+        if isinstance(e, (list, tuple)) and len(e) >= 2:
+            a, b = str(e[0]).strip(), str(e[1]).strip()
+        elif isinstance(e, dict):
+            a, b = str(e.get("from", "")).strip(), str(e.get("to", "")).strip()
+        else:
+            continue
+        if a in ids and b in ids and a != b:
+            edges.append([a, b])
+    return {"nodes": nodes, "edges": edges}
+
+
+def _fallback_diagram(concepts) -> dict | None:
+    """Build a simple linear flow diagram from the visual concepts."""
+    items = [str(c).strip() for c in (concepts or []) if str(c).strip()][:6]
+    if len(items) < 2:
+        return None
+    nodes = [{"id": f"n{i}", "label": c[:40]} for i, c in enumerate(items)]
+    edges = [[f"n{i}", f"n{i + 1}"] for i in range(len(items) - 1)]
+    return {"nodes": nodes, "edges": edges}
 
 
 def _extractive_summary(title: str, text: str) -> dict:
@@ -104,8 +163,10 @@ def _extractive_summary(title: str, text: str) -> dict:
         if words >= 120:
             break
     narration = " ".join(script) or f"This section covers {title}."
+    concepts = _keywords(text, title)
     return {"narration_script": narration[:1200],
-            "visual_concepts": _keywords(text, title)}
+            "visual_concepts": concepts,
+            "diagram": _fallback_diagram(concepts)}
 
 
 _STOP = set("the a an and or of to in for on with is are was were be by as at from "

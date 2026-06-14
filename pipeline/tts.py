@@ -15,6 +15,8 @@ from pipeline.config import DEFAULT_VOICE, TTS_SAMPLE_RATE, new_tmp
 
 log = logging.getLogger("sketchnote.tts")
 
+# Slightly faster than 1.0 for a more natural, energetic narration pace.
+TTS_SPEED = 1.2
 _PIPELINE = None  # lazy KPipeline singleton (loading weights is expensive)
 
 
@@ -51,7 +53,8 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE) -> tuple[str, float]:
 
     pipeline = _get_pipeline()
     chunks: list[np.ndarray] = []
-    for _graphemes, _phonemes, audio in pipeline(text, voice=voice):
+    for _graphemes, _phonemes, audio in pipeline(text, voice=voice,
+                                                 speed=TTS_SPEED):
         chunks.append(_to_numpy(audio))
 
     if not chunks:
