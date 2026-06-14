@@ -43,7 +43,7 @@ def run_pipeline(pdf_file, max_chapters, page_start, page_end, voice, use_sdxl,
     if not chapters:
         return None, "Could not extract any chapters from this PDF."
 
-    clips, transcript = [], []
+    clips, transcript, warnings = [], [], []
     n = len(chapters)
     for i, ch in enumerate(chapters):
         frac = 0.1 + 0.8 * (i / max(1, n))
@@ -52,6 +52,8 @@ def run_pipeline(pdf_file, max_chapters, page_start, page_end, voice, use_sdxl,
             clip = _build_chapter(ch, voice, use_sdxl)
             clips.append(clip["path"])
             transcript.append(clip["md"])
+            if clip.get("warning"):
+                warnings.append(clip["warning"])
         except Exception:  # noqa: BLE001 — never let one chapter kill the run
             log.error("Chapter %d failed:\n%s", i + 1, traceback.format_exc())
             transcript.append(f"### {i + 1}. {ch['title']}\n\n_(skipped — error)_\n")
@@ -62,27 +64,59 @@ def run_pipeline(pdf_file, max_chapters, page_start, page_end, voice, use_sdxl,
     progress(0.92, desc="Stitching chapters into the final video…")
     final = video.concat(clips)
     progress(1.0, desc="Done!")
-    return final, "\n".join(transcript)
+
+    warn_banner = ""
+    if warnings:
+        unique = list(dict.fromkeys(warnings))  # dedupe, preserve order
+        warn_banner = "\n".join(f"> ⚠️ **{w}**" for w in unique) + "\n\n"
+    return final, warn_banner + "\n".join(transcript)
 
 
 def _build_chapter(ch: dict, voice: str, use_sdxl: bool) -> dict:
-    """Render a single chapter to a muxed clip; returns {path, md}."""
+    """Render a single chapter to a muxed clip using per-beat synchronization.
+
+    For each beat:
+      1. Synthesize just that beat's sentence with Kokoro → get duration d.
+      2. Render the cumulative storyboard diagram (nodes 0..k).
+      3. animate_beat reveals only the new node k + its arrow over d seconds
+         (prior nodes stay drawn; drawing finishes at ~75 % then holds).
+      4. Mux beat audio onto the beat clip.
+    All beat clips are concatenated into the chapter clip.
+
+    Returns {path, md, warning}.
+    """
     summary = llm.summarize_chapter(ch["title"], ch["text"])
-    narration = summary.get("narration_script") or ch["text"][:600]
-    concepts = summary.get("visual_concepts") or [ch["title"]]
-    diagram = summary.get("diagram")
+    beats = summary.get("beats") or []
+    warning = summary.get("warning")  # surfaced in the UI transcript
 
-    wav_path, duration = tts.synthesize(narration, voice=voice)
-    png_path = visuals_mod.build_visual(concepts, ch["title"], diagram=diagram,
-                                        use_sdxl=use_sdxl)
-    silent = sketch.animate(png_path, target_duration=duration)
-    clip_path = video.mux(silent, wav_path)
+    # Graceful fallback: if we somehow have no beats at all, one sentence.
+    if not beats:
+        beats = [{"say": ch["text"][:300] or f"This section covers {ch['title']}.",
+                  "node": ch["title"][:40], "connects_to": None}]
 
-    bullets = "\n".join(f"- {c}" for c in concepts)
-    md = (f"### {ch['title']}\n\n"
-          f"**Visual concepts:**\n{bullets}\n\n"
-          f"**Narration:**\n{narration}\n")
-    return {"path": clip_path, "md": md}
+    beat_clips: list[str] = []
+    beat_mds: list[str] = []
+    prev_png: str | None = None
+
+    for k, beat in enumerate(beats):
+        log.info("Chapter %r beat %d/%d: node=%r", ch["title"], k + 1, len(beats),
+                 beat["node"])
+        # Cumulative diagram up to (and including) beat k.
+        full_png = visuals_mod.build_storyboard_frame(beats[: k + 1], ch["title"])
+
+        wav_path, duration = tts.synthesize(beat["say"], voice=voice)
+        silent = sketch.animate_beat(full_png, prev_png, target_duration=duration)
+        clip = video.mux(silent, wav_path)
+        beat_clips.append(clip)
+        beat_mds.append(f"- **{beat['node']}**: {beat['say']}")
+        prev_png = full_png
+
+    chapter_clip = video.concat(beat_clips) if len(beat_clips) > 1 else beat_clips[0]
+
+    warn_md = f"\n\n> ⚠️ **{warning}**" if warning else ""
+    md = (f"### {ch['title']}{warn_md}\n\n"
+          + "\n".join(beat_mds) + "\n")
+    return {"path": chapter_clip, "md": md, "warning": warning}
 
 
 def build_ui() -> gr.Blocks:

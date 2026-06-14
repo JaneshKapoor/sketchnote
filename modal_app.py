@@ -67,22 +67,26 @@ sdxl_image = (
 )
 
 # Prompt mirrored from pipeline/llm.py (containers don't import the Space code).
-SUMMARIZE_PROMPT = (
+# NOTE: built with <<TITLE>>/<<TEXT>> placeholders + str.replace (NOT str.format)
+# because the example JSON below contains literal { } braces.
+STORYBOARD_PROMPT = (
     "You are scripting an educational whiteboard sketch-note video.\n"
     "Read the chapter and return STRICT JSON ONLY (no markdown, no code "
-    "fences, no commentary) with exactly these keys:\n"
-    '  "narration_script": a spoken-style summary of 80-150 words, clear and '
-    "engaging, plain text only (no bullets, no markdown).\n"
-    '  "visual_concepts": an array of 3 to 5 short noun phrases (2-4 words '
-    "each) naming the key ideas to draw.\n"
-    '  "diagram": an object with "nodes" and "edges" that diagrams how the key '
-    "ideas connect. "
-    '"nodes" is an array of 3 to 6 objects, each {"id": a short unique id, '
-    '"label": a real concept name of 1-4 words from the chapter}. '
-    '"edges" is an array of [from_id, to_id] pairs showing the flow/'
-    "relationship between nodes (use the real ids). Keep labels concrete and "
-    "specific to the chapter, never placeholders.\n\n"
-    "Chapter title: {title}\nChapter text:\n{text}\n\nReturn only the JSON object."
+    "fences, no commentary).\n"
+    'Return an object with a single key "beats": an array of 3 to 6 beats.\n'
+    "Each beat is an object with exactly these keys:\n"
+    '  "say": one complete spoken sentence of 15-25 words, in your own words '
+    "(no bullets, no page numbers, do not repeat the chapter title).\n"
+    '  "node": a 2-4 word label naming the single idea drawn for this beat.\n'
+    '  "connects_to": the exact node label of an EARLIER beat this builds on, '
+    "or null for the first beat.\n"
+    "Every node label must be unique. connects_to must match an earlier node "
+    "label exactly, or be null.\n\n"
+    "Chapter title: <<TITLE>>\n"
+    "Chapter text:\n<<TEXT>>\n\n"
+    "Return only the JSON object, for example: "
+    '{"beats":[{"say":"...","node":"First Idea","connects_to":null},'
+    '{"say":"...","node":"Second Idea","connects_to":"First Idea"}]}'
 )
 
 _LLM: dict = {}  # warm-container cache: {"model":..., "tokenizer":...}
@@ -114,7 +118,7 @@ def _strip_json(raw: str) -> dict | None:
               volumes={CACHE_DIR: cache_vol}, timeout=900,
               scaledown_window=300)
 def summarize_chapter(title: str, text: str) -> dict:
-    """MiniCPM4.1-8B (8B params) -> strict-JSON chapter summary + visuals."""
+    """MiniCPM4.1-8B (8B params) -> strict-JSON storyboard {"beats":[...]}."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -126,7 +130,10 @@ def summarize_chapter(title: str, text: str) -> dict:
         _LLM.update(model=model, tokenizer=tok)
 
     tok, model = _LLM["tokenizer"], _LLM["model"]
-    prompt = SUMMARIZE_PROMPT.format(title=title, text=text[:6000])
+    # .replace (not .format): the prompt's example JSON has literal { } braces.
+    prompt = (STORYBOARD_PROMPT
+              .replace("<<TITLE>>", title or "")
+              .replace("<<TEXT>>", (text or "")[:6000]))
 
     def _run(user_prompt: str) -> str:
         messages = [{"role": "user", "content": user_prompt}]
@@ -139,11 +146,13 @@ def summarize_chapter(title: str, text: str) -> dict:
         return tok.decode(out[0][inputs["input_ids"].shape[-1]:],
                           skip_special_tokens=True)
 
-    parsed = _strip_json(_run(prompt))
-    if parsed is None:  # one retry with a stricter nudge
-        parsed = _strip_json(_run(prompt + "\nOutput ONLY valid JSON, nothing else."))
+    raw = _run(prompt)
+    parsed = _strip_json(raw)
+    if parsed is None or not parsed.get("beats"):  # one retry with a stricter nudge
+        raw = _run(prompt + "\nOutput ONLY the JSON object, nothing else.")
+        parsed = _strip_json(raw)
     if parsed is None:
-        parsed = {"narration_script": "", "visual_concepts": []}
+        parsed = {"beats": [], "raw": raw[:2000]}
     return parsed
 
 

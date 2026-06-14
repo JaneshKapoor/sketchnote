@@ -27,6 +27,71 @@ SDXL_NEGATIVE = ("text, letters, words, labels, watermark, signature, caption, "
                  "numbers, multiple objects, clutter, color, shading, gradient")
 
 
+def build_storyboard_frame(beats: list[dict], title: str) -> str:
+    """Render a cumulative storyboard diagram for beats[0..k-1].
+
+    Each beat dict has ``{say, node, connects_to}``.  Nodes are laid out in a
+    grid and edges are drawn from each beat's ``connects_to`` node (if any).
+    Uses ``plt.xkcd()`` for a hand-drawn whiteboard feel.
+
+    Returns the path to the saved PNG.
+    """
+    out_path = new_tmp(suffix=".png", prefix="story_")
+    n = len(beats)
+    if n == 0:
+        # Empty diagram: just the title + rule on a white card.
+        fig = plt.figure(figsize=(VIDEO_WIDTH / 100, VIDEO_HEIGHT / 100), dpi=100)
+        fig.patch.set_facecolor("white")
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
+        wrapped = "\n".join(textwrap.wrap(title or "Sketchnote", width=36)[:2])
+        ax.text(0.5, 0.95, wrapped, ha="center", va="top", color="black",
+                fontsize=26, fontweight="bold")
+        ax.plot([0.08, 0.92], [0.82, 0.82], color="black", linewidth=2.5)
+        fig.savefig(out_path, facecolor="white")
+        plt.close(fig)
+        return out_path
+
+    label_to_idx = {b["node"]: i for i, b in enumerate(beats)}
+    pos = _node_positions(n)
+    bw, bh = 0.24, 0.13
+
+    with plt.xkcd():
+        fig = plt.figure(figsize=(VIDEO_WIDTH / 100, VIDEO_HEIGHT / 100), dpi=100)
+        fig.patch.set_facecolor("white")
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
+
+        # Title + horizontal rule.
+        wrapped = "\n".join(textwrap.wrap(title or "Sketchnote", width=36)[:2])
+        ax.text(0.5, 0.95, wrapped, ha="center", va="top", color="black",
+                fontsize=26, fontweight="bold")
+        ax.plot([0.08, 0.92], [0.82, 0.82], color="black", linewidth=2.5)
+
+        # Edges first (under boxes).
+        for b in beats:
+            ct = b.get("connects_to")
+            if ct and ct in label_to_idx:
+                src = label_to_idx[ct]
+                dst = label_to_idx[b["node"]]
+                ax.annotate("", xy=pos[dst], xytext=pos[src],
+                            arrowprops=dict(arrowstyle="-|>", color="black",
+                                            lw=2, shrinkA=24, shrinkB=24))
+
+        # Boxes + labels.
+        for b, (cx, cy) in zip(beats, pos):
+            ax.add_patch(plt.Rectangle((cx - bw / 2, cy - bh / 2), bw, bh,
+                                       fill=False, edgecolor="black", linewidth=2.5))
+            text = "\n".join(textwrap.wrap(b["node"], width=14)[:3])
+            ax.text(cx, cy, text, ha="center", va="center",
+                    fontsize=13, color="black")
+
+        fig.savefig(out_path, facecolor="white")
+    plt.close(fig)
+    log.info("storyboard frame (%d/%d beats) -> %s", n, n, out_path)
+    return out_path
+
+
 def build_visual(concepts, title: str, diagram=None,
                  use_sdxl: bool = False) -> str:
     """Return a PNG path for the chapter's visual.

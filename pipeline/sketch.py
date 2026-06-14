@@ -150,6 +150,105 @@ def animate(
     return out_path
 
 
+def animate_beat(
+    full_png: str,
+    base_png: str | None,
+    target_duration: float,
+    fps: int = DEFAULT_FPS,
+    width: int = VIDEO_WIDTH,
+    height: int = VIDEO_HEIGHT,
+) -> str:
+    """Render the INCREMENTAL reveal of a single storyboard beat as an MP4.
+
+    ``full_png``  — cumulative diagram image including the new node.
+    ``base_png``  — cumulative diagram from the *previous* beat (or None for
+                    the very first beat, in which case animation starts from
+                    a blank white canvas).
+
+    The prior nodes shown in ``base_png`` are rendered as a static background;
+    only the pixels that are *new* in ``full_png`` (i.e. the new box + arrow)
+    are revealed progressively in reading/stroke order.  Drawing completes at
+    ~75 % of ``target_duration``; the finished frame is held for the remainder.
+    """
+    target_duration = max(0.5, float(target_duration))
+    total_frames = max(1, int(round(target_duration * fps)))
+    draw_frames = max(1, int(total_frames * DRAW_FRACTION))
+
+    # ── Prepare images ──────────────────────────────────────────────────────
+    full_art = _prepare(full_png, width, height)
+    full_line = _line_art(full_art)
+
+    if base_png is not None:
+        base_art = _prepare(base_png, width, height)
+        base_line = _line_art(base_art)
+    else:
+        base_line = np.full((height, width, 3), 255, dtype=np.uint8)
+
+    # ── New-ink mask: pixels present in full but absent in base ─────────────
+    full_gray = cv2.cvtColor(full_line, cv2.COLOR_BGR2GRAY)
+    base_gray = cv2.cvtColor(base_line, cv2.COLOR_BGR2GRAY)
+    new_ink = ((full_gray < 200) & (base_gray >= 200)).astype(np.uint8) * 255
+
+    # Find stroke points only within the new region.
+    contours, _ = cv2.findContours(new_ink, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    contours = [c for c in contours if len(c) >= 4]
+    contours.sort(key=lambda c: (int(c[:, 0, 1].min()) // 48,
+                                 int(c[:, 0, 0].min())))
+    points: list[tuple[int, int]] = []
+    for c in contours:
+        cp = c.reshape(-1, 2)
+        points.extend((int(x), int(y)) for x, y in cp[::STROKE_STRIDE])
+    if not points:
+        # Nothing new to draw — just hold the full frame for the whole clip.
+        points = []
+
+    n = len(points)
+    out_path = new_tmp(suffix=".mp4", prefix="beat_")
+    cmd = [
+        ffmpeg_bin(), "-y", "-loglevel", "error",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-s", f"{width}x{height}", "-r", str(fps), "-i", "-",
+        "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", out_path,
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    shown = base_line.copy()   # start from the already-drawn prior state
+    drawn = 0
+    try:
+        for f in range(total_frames):
+            if n == 0:
+                # No new ink — show complete frame immediately.
+                proc.stdin.write(full_line.tobytes())
+                continue
+            p = min(1.0, f / float(draw_frames))
+            target = int(round(p * n))
+            while drawn < target:
+                x, y = points[drawn]
+                x0 = max(0, x - REVEAL_R); y0 = max(0, y - REVEAL_R)
+                x1 = min(width, x + REVEAL_R); y1 = min(height, y + REVEAL_R)
+                shown[y0:y1, x0:x1] = full_line[y0:y1, x0:x1]
+                drawn += 1
+            done = drawn >= n and p >= 1.0
+            if done:
+                frame = full_line
+            else:
+                frame = shown.copy()
+                hx, hy = points[min(drawn, n - 1)]
+                _draw_hand(frame, hx, hy)
+            proc.stdin.write(frame.tobytes())
+        proc.stdin.close()
+        ret = proc.wait()
+        if ret != 0:
+            err = proc.stderr.read().decode("utf-8", "ignore")
+            raise RuntimeError(f"ffmpeg beat encode failed: {err[:400]}")
+    finally:
+        if proc.stderr:
+            proc.stderr.close()
+    log.info("beat: %.2fs @ %dfps, %d new stroke-points -> %s",
+             target_duration, fps, n, out_path)
+    return out_path
+
+
 if __name__ == "__main__":  # quick manual check
     import sys
 
