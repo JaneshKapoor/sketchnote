@@ -116,7 +116,7 @@ def _strip_json(raw: str) -> dict | None:
 
 @app.function(image=llm_image, gpu="A10G", secrets=[hf_secret],
               volumes={CACHE_DIR: cache_vol}, timeout=900,
-              scaledown_window=300, min_containers=1)
+              scaledown_window=300, min_containers=0)
 def summarize_chapter(title: str, text: str) -> dict:
     """MiniCPM4.1-8B (8B params) -> strict-JSON storyboard {"beats":[...]}."""
     import torch
