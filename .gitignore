@@ -1,0 +1,24 @@
+# Secrets — NEVER commit
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.eggs/
+
+# Build / cache
+.cache/
+.sketchnote_cache/
+outputs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Media work files (keep assets/sample.pdf tracked)
+*.tmp
+tmp/
