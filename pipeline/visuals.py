@@ -29,18 +29,22 @@ SDXL_NEGATIVE = ("text, letters, words, labels, watermark, signature, caption, "
                  "numbers, multiple objects, clutter, color, shading, gradient")
 
 
-def build_storyboard_frame(beats: list[dict], title: str) -> str:
-    """Render a cumulative storyboard diagram for beats[0..k-1].
+def build_storyboard_frame(beats: list[dict], title: str,
+                           upto: int | None = None) -> str:
+    """Render a cumulative storyboard diagram, filling a FIXED canvas.
 
-    Each beat dict has ``{say, node, connects_to}``.  Nodes are laid out in a
-    grid and edges are drawn from each beat's ``connects_to`` node (if any).
-    Uses ``plt.xkcd()`` for a hand-drawn whiteboard feel.
+    ``beats`` is always the chapter's FULL beat list so the layout is computed
+    once; ``upto`` selects how many nodes to draw (1..k).  Nodes 1..upto are
+    rendered at their FINAL positions — the diagram fills in on a stable canvas
+    instead of being re-laid-out (which used to move every node each beat).
 
-    Returns the path to the saved PNG.
+    Each beat dict has ``{say, node, connects_to}``.  Uses ``plt.xkcd()`` for a
+    hand-drawn whiteboard feel.  Returns the path to the saved PNG.
     """
     out_path = new_tmp(suffix=".png", prefix="story_")
-    n = len(beats)
-    if n == 0:
+    n_full = len(beats)
+    k = n_full if upto is None else max(0, min(upto, n_full))
+    if n_full == 0 or k == 0:
         # Empty diagram: just the title + rule on a white card.
         fig = plt.figure(figsize=(VIDEO_WIDTH / 100, VIDEO_HEIGHT / 100), dpi=100)
         fig.patch.set_facecolor("white")
@@ -54,11 +58,13 @@ def build_storyboard_frame(beats: list[dict], title: str) -> str:
         plt.close(fig)
         return out_path
 
+    # Layout + box size computed ONCE from the FULL beat set so positions are
+    # identical across every beat frame (the key fix for the moving-node bug).
     label_to_idx = {}
     for i, b in enumerate(beats):
         label_to_idx.setdefault(b["node"], i)
     pos, bw, bh = _graph_positions(beats)
-    # Scale arrow gap, font and wrap width to the (possibly shrunk) box size.
+    # Scale arrow gap, font and wrap width to the (fixed) box size.
     shrink = max(12.0, min(bw, bh) * VIDEO_HEIGHT * 0.36)
     fs = max(9, int(round(13 * bw / 0.24)))
     wrap_w = max(8, int(round(14 * bw / 0.24)))
@@ -75,27 +81,28 @@ def build_storyboard_frame(beats: list[dict], title: str) -> str:
                 fontsize=26, fontweight="bold")
         ax.plot([0.08, 0.92], [0.82, 0.82], color="black", linewidth=2.5)
 
-        # Edges first (under boxes) — follow the connects_to graph.
-        for b in beats:
+        # Edges first (under boxes) — only between nodes that are visible (< k).
+        for b in beats[:k]:
             ct = b.get("connects_to")
             dst_i = label_to_idx.get(b["node"])
-            if ct and ct in label_to_idx and label_to_idx[ct] != dst_i:
-                src = label_to_idx[ct]
+            src = label_to_idx.get(ct) if ct else None
+            if src is not None and src != dst_i and src < k:
                 ax.annotate("", xy=pos[dst_i], xytext=pos[src],
                             arrowprops=dict(arrowstyle="-|>", color="black",
                                             lw=2, shrinkA=shrink, shrinkB=shrink))
 
-        # Boxes + labels.
-        for b, (cx, cy) in zip(beats, pos):
+        # Boxes + labels for the first k nodes at their FINAL positions.
+        for i in range(k):
+            cx, cy = pos[i]
             ax.add_patch(plt.Rectangle((cx - bw / 2, cy - bh / 2), bw, bh,
                                        fill=False, edgecolor="black", linewidth=2.5))
-            text = "\n".join(textwrap.wrap(b["node"], width=wrap_w)[:3])
+            text = "\n".join(textwrap.wrap(beats[i]["node"], width=wrap_w)[:3])
             ax.text(cx, cy, text, ha="center", va="center",
                     fontsize=fs, color="black")
 
         fig.savefig(out_path, facecolor="white")
     plt.close(fig)
-    log.info("storyboard frame (%d/%d beats) -> %s", n, n, out_path)
+    log.info("storyboard frame (%d/%d beats) -> %s", k, n_full, out_path)
     return out_path
 
 
@@ -135,17 +142,19 @@ def chapter_illustration(title: str, beats: list[dict]) -> str | None:
 
 
 def build_image_label_frame(beats: list[dict], title: str,
-                            bg_path: str) -> str:
+                            bg_path: str, upto: int | None = None) -> str:
     """Render the SDXL chapter image with our node labels overlaid on top.
 
-    Labels for ``beats[0..k-1]`` are placed at positions from the
-    ``connects_to`` graph (no boxes, no arrows — per the image-only design) with
-    a white halo so the technical terms stay readable over the illustration.
-    Returns the path to the saved PNG.
+    ``beats`` is the chapter's FULL beat list (so label positions are computed
+    once and stay fixed); ``upto`` selects how many labels to draw (1..k).  The
+    labels are placed at positions from the ``connects_to`` graph (no boxes, no
+    arrows — per the image-only design) with a white halo so the technical terms
+    stay readable over the illustration.  Returns the path to the saved PNG.
     """
     out_path = new_tmp(suffix=".png", prefix="imglbl_")
-    n = len(beats)
-    pos, bw, _bh = _graph_positions(beats) if n else ([], 0.24, 0.13)
+    n_full = len(beats)
+    k = n_full if upto is None else max(0, min(upto, n_full))
+    pos, bw, _bh = _graph_positions(beats) if n_full else ([], 0.24, 0.13)
     fs = max(11, int(round(15 * bw / 0.24)))
     wrap_w = max(8, int(round(16 * bw / 0.24)))
 
@@ -164,16 +173,18 @@ def build_image_label_frame(beats: list[dict], title: str,
             fontsize=26, fontweight="bold", zorder=6)
     ax.plot([0.08, 0.92], [0.84, 0.84], color="black", linewidth=2.5, zorder=6)
 
-    # Node labels overlaid on the image — white halo keeps them readable.
-    for b, (cx, cy) in zip(beats, pos):
-        text = "\n".join(textwrap.wrap(b["node"], width=wrap_w)[:3])
+    # First k node labels overlaid at their FINAL positions — white halo keeps
+    # them readable. Positions never move because layout used the full set.
+    for i in range(k):
+        cx, cy = pos[i]
+        text = "\n".join(textwrap.wrap(beats[i]["node"], width=wrap_w)[:3])
         ax.text(cx, cy, text, ha="center", va="center", color="black",
                 fontsize=fs, fontweight="bold", zorder=5,
                 path_effects=[pe.withStroke(linewidth=5, foreground="white")])
 
     fig.savefig(out_path, facecolor="white")
     plt.close(fig)
-    log.info("image+label frame (%d/%d labels) -> %s", n, n, out_path)
+    log.info("image+label frame (%d/%d labels) -> %s", k, n_full, out_path)
     return out_path
 
 

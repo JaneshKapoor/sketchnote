@@ -107,12 +107,15 @@ def _build_chapter(ch: dict, voice: str, use_sdxl: bool) -> dict:
     for k, beat in enumerate(beats):
         log.info("Chapter %r beat %d/%d: node=%r", ch["title"], k + 1, len(beats),
                  beat["node"])
-        # Cumulative visual up to (and including) beat k.
+        # Cumulative visual up to (and including) beat k. The FULL beats list is
+        # passed so layout is computed once; ``upto`` fills in nodes 1..k+1 at
+        # their final fixed positions (prior nodes never move between beats).
         if bg_path:
             full_png = visuals_mod.build_image_label_frame(
-                beats[: k + 1], ch["title"], bg_path)
+                beats, ch["title"], bg_path, upto=k + 1)
         else:
-            full_png = visuals_mod.build_storyboard_frame(beats[: k + 1], ch["title"])
+            full_png = visuals_mod.build_storyboard_frame(
+                beats, ch["title"], upto=k + 1)
 
         wav_path, duration = tts.synthesize(beat["say"], voice=voice)
         silent = sketch.animate_beat(full_png, prev_png, target_duration=duration)
